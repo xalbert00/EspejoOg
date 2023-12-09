@@ -1,0 +1,515 @@
+/**
+ * FirstId SDK Version, we respect semver
+ * @const
+ * @type {string}
+ */
+const FIDSDK_VERSION = '0.6.0';
+var __FIRSTID__ = null;
+
+function FirstIdCookieNotFound(cookieName) {
+  this.message = `First-id cookie "${cookieName}" not found`;
+  this.code = 'FirstIdCookieNotFound';
+}
+
+function FirstIdEmptyValue(cookieName) {
+  this.message = `First-id cookie "${cookieName}" contains an empty value`;
+  this.code = 'FirstIdEmptyValue';
+}
+
+function FirstIdUserDoNotTrack() {
+  this.message = `The current user has opted out of tracking`;
+  this.code = 'FirstIdUserDoNotTrack';
+}
+
+function FirstIdEmailGetterCallbackIsNotFunction() {
+  this.message = `The config "emailGetterCallback" must be a function`;
+  this.code = 'FirstIdEmailGetterCallbackIsNotFunction';
+}
+
+/**
+ * FirstId SDK
+ * @constructor
+ */
+const FirstIdSdk = function () {
+
+  this.version = FIDSDK_VERSION;
+  /**
+   * FirstId config
+   * @property {string} cookieName The name of the cookie
+   * @property {string} version The version of the sdk
+   * @property {boolean} debug Enable the debug mode
+   * @type {object}
+   */
+  this.config = {
+    callbacks: [],
+    cookieName: 'firstid',
+    cookieNameTTLInMinute: 60 * 24 * 30 * 13, // 13 months
+    version: this.version,
+    debug: false,
+
+    isIframe: false,
+    intervalRequestFirstIdFromParentMs: 100,
+    callbacksWhenIframeReceiveFirstId: [],
+    iframeAppendFirstIdToLinkCssSelector: [],
+
+    emailCookieName: 'fid_email_hashed',
+    emailHashed: null,
+    emailGetterCallback: null,
+
+    firstIdEchoFeature: false,
+
+    syncIpUaCookieName: 'fidecholastsync',
+    syncFidEmailCookieName: 'fidechoemaillastsync',
+    refreshCookieName: 'refresh',
+
+    firstIdApiBaseUrl: 'https://api.first-id.fr',
+
+    cookieDomain: null,
+
+    ...window.firstId || {}
+  };
+
+  this.intervalReferenceRequestFirstIdFromParent = null;
+  this.firstId = null;
+
+  this.emailHashed = null;
+
+  if (this.config.debug) {
+    console.debug('First-id SDK initialized. Current version is : ' + this.version);
+  }
+
+  /**
+   * Set the configuration for the SDK
+   * @param config {object} The configuration object
+   * @access public
+   */
+  this.setConfig = (config) => {
+    this.config = config;
+  };
+
+  /**
+   * Get the configuration for the SDK
+   * @access public
+   * @returns {object} configuration object
+   * @see {@link config}
+   */
+  this.getConfig = () => {
+    return this.config
+  };
+
+  /**
+   * Get the version of the SDK
+   * @access public
+   * @returns {string} Version of the SDK
+   */
+  this.getVersion = function () {
+    return this.version;
+  };
+
+  /**
+   * Get the First-id value from the cookie name
+   * @access public
+   * @returns {string} First-id value
+   * @throws FirstIdCookieNotFound
+   * @throws FirstIdEmptyValue
+   * @throws FirstIdUserDoNotTrack
+   */
+  this.getId = function() {
+    if (this.config.isIframe && this.firstId) {
+      return this.firstId;
+    }
+
+    let val = this.__getCookieValueFromCookieName(this.config.cookieName);
+
+    if (val === null) {
+      throw new FirstIdCookieNotFound(this.config.cookieName);
+    }
+    if (val === '') {
+      throw new FirstIdEmptyValue(this.config.cookieName);
+    }
+    if (val === 'NO_TRACKING') {
+      throw new FirstIdUserDoNotTrack();
+    }
+
+    return val;
+  };
+
+  this.getEmailHashed = () => {
+    if (this.emailHashed) {
+      return this.emailHashed;
+    }
+
+    let val = null;
+
+    if (this.config.emailCookieName) {
+      return this.__getCookieValueFromCookieName(this.config.emailCookieName);
+    } else if (this.config.emailHashed) {
+      return this.config.emailHashed;
+    } else if (this.config.getEmailMethod) {
+      try {
+        return this.config.getEmailMethod();
+      } catch (e) {
+        if (this.config.debug) {
+          console.error(`[FIRSTID] Error on getEmailMethod`, e);
+        }
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Get eids object for Prebid.js PubProvidedID UserID Module
+   * @access public
+   */
+  this.getFirstIdEidsObject = () => {
+    return [{
+      source: "first-id.fr",
+      uids: [{
+        atype: 1,
+        ext: {
+          stype: "ppuid"
+        },
+        id: this.getId(),
+      }]
+    }];
+  };
+
+  /**
+   *
+   * @param cookieName
+   * @returns {null|string}
+   * @private
+   */
+  this.__getCookieValueFromCookieName = (cookieName) => {
+    let cookieArr = document.cookie.split(";");
+    for(let i = 0; i < cookieArr.length; i++) {
+      let cookiePair = cookieArr[i].split("=");
+      if(cookieName === cookiePair[0].trim()) {
+        return decodeURIComponent(cookiePair[1]);
+      }
+    }
+    return null;
+  };
+
+  this._setCookie = (cName, cValue, exMinutes) => {
+    let date = new Date();
+    date.setTime(date.getTime() + (exMinutes * 60 * 1000));
+    const expires = "expires=" + date.toUTCString();
+    let domain;
+    if (this.config.cookieDomain) {
+      if (this.config.cookieDomain.charAt(0) === '.') {
+        domain = this.config.cookieDomain;
+      } else {
+        domain = '.' + this.config.cookieDomain;
+      }
+    } else {
+      // get root domain
+      domain = window.location.hostname.split('.').slice(-2).join('.');
+    }
+    let secure = '';
+    if (window.location.protocol === 'https:') {
+      secure = ';Secure';
+    }
+    document.cookie = cName + "=" + cValue + "; " + expires + "; path=/; domain=" + domain + secure;
+  }
+
+  /**
+   * Get the cookie name configure in the SDK instance
+   * @access public
+   */
+  this.getCookieName = () => {
+    return this.config.cookieName
+  };
+
+  /**
+   * Set the cookie name for the SDK instance
+   * @param cookieName {string} The name of the cookie
+   */
+  this.setCookieName = (cookieName) => {
+    this.config.cookieName = cookieName;
+  }
+
+  this.askFirstIdToParentIframe = () => {
+    const requestFirstIdFromParent = () => {
+      if (this.config.debug) {
+        console.debug(`Request FirstID from parent each ${this.config.intervalRequestFirstIdFromParentMs} ms...`)
+      }
+      window.top.postMessage("requestFirstID", "*")
+    }
+
+    this.config.intervalReferenceRequestFirstIdFromParent = setInterval(requestFirstIdFromParent, this.config.intervalRequestFirstIdFromParentMs)
+
+    window.addEventListener("message", (event) => {
+      if (this.config.debug) {
+        console.debug('[FIRSTID IFRAME] message from parent', event)
+      }
+
+      if (!event.data.firstid) {
+        return;
+      }
+      clearInterval(this.config.intervalReferenceRequestFirstIdFromParent)
+
+      if (this.config.debug) {
+        console.debug(`[FIRSTID IFRAME] iFrame has been receive successfully firstID ${event.data.firstid}`, event)
+      }
+
+      this.firstId = event.data.firstid
+      __FIRSTID__ = event.data.firstid
+      event.source.postMessage("firstidACK", "*");
+
+      this.iframeAppendFirstIdToLink();
+
+      this.config.callbacksWhenIframeReceiveFirstId.forEach((callback, index) => {
+        if (this.config.debug) {
+          console.debug(`[FIRSTID IFRAME] Invoke callback start #${index}`, callback);
+        }
+        try {
+          callback(this.firstId);
+          if (this.config.debug) {
+            console.debug(`[FIRSTID IFRAME] Invoke callback done #${index}`, callback);
+          }
+        } catch (e) {
+          if (this.config.debug) {
+            console.error(`[FIRSTID IFRAME] Callback #${index} throw an error`, callback);
+          }
+        }
+      })
+
+    }, true);
+  }
+
+  this._addListerFromIframeMessage = () => {
+    window.addEventListener("message", (event) => {
+      if (this.config.debug) {
+        console.debug('[FIRSTID] message from iframe', event)
+      }
+      if (event.data === 'firstidACK') {
+        if (this.config.debug) {
+          console.log('[FIRSTID] iFrame has been receive successfully firstID', event)
+        }
+      }
+
+      if (event.data === 'requestFirstID') {
+        if (this.config.debug) {
+          console.log('[FIRSTID] iFrame request firstID', event)
+        }
+        event.source.postMessage({firstid: this.getId()}, '*');
+      }
+    }, true);
+  }
+
+  this._hashAlreadyUpdateIpUa = () => {
+    return !!this.__getCookieValueFromCookieName(this.config.syncIpUaCookieName)
+  }
+
+  this._hashAlreadyCheckFirstIdEmailAssociation = () => {
+    return !!this.__getCookieValueFromCookieName(this.config.syncFidEmailCookieName)
+  }
+
+  this._updateIpUa = () => {
+    if (!this.firstId) {
+      if (window.firstId.debug) {
+        console.debug("[FIRSTID] Can't update ip and ua because firstId is null");
+      }
+      return;
+    }
+
+    // appel API pour mettre à jour l'ip et l'ua
+    fetch(`${this.config.firstIdApiBaseUrl}/firstId?firstId=${this.firstId}`, {
+      method: 'PUT'
+    }).then((response) => {
+      if (response.ok) {
+        this._setCookie(this.config.syncIpUaCookieName, 1, 60 * 6) // 6 hours
+        if (window.firstId.debug) {
+          console.debug("[FIRSTID] Update FirstID print done");
+        }
+      } else {
+        if (window.firstId.debug) {
+          console.error("[FIRSTID] Error on update FirstID print", response.status, response.statusText);
+        }
+      }
+    })
+  }
+
+  this._checkMatchCookieWIthEMail = async (emailHashed) => {
+    if (!this.firstId) {
+      if (window.firstId.debug) {
+        console.debug("[FIRSTID] Can't check match cookie with email because firstId is null");
+      }
+      return;
+    }
+
+    // appel API pour vérifier si le cookie du domaine match avec le firstid associé à l'email
+    const response = await fetch(`${this.config.firstIdApiBaseUrl}/emailAssoc?firstId=${this.firstId}&email=${emailHashed}`, {})
+    if (response.ok) {
+      if (window.firstId.debug) {
+        console.debug("[FIRSTID] Check match cookie with email done");
+      }
+      return await response.json()
+    } else {
+      if (window.firstId.debug) {
+        console.error("[FIRSTID] Error on check match cookie with email", response.status, response.statusText);
+      }
+    }
+  }
+
+  this._setFirstIdCookie = (firstId) => {
+    // creéer ou mise à jour du cookie first-id
+    this._setCookie(this.config.cookieName, firstId, this.config.cookieNameTTLInMinute)
+  }
+
+  this._createRefreshCookie = () => {
+    // créer un cookie indiquant au CDN de l'éditeur de refaire une redirection vers la gate en passant l'email en query params
+    this._setCookie(this.config.refreshCookieName, 1, this.config.cookieNameTTLInMinute)
+  }
+
+  this._checkEmailExist = async (emailHashed) => {
+    // appel API pour vérifier si l'email existe déjà
+    const response = await fetch(`${this.config.firstIdApiBaseUrl}/emailExist?email=${emailHashed}`, {})
+    if (response.ok) {
+      if (window.firstId.debug) {
+        console.debug("[FIRSTID] Check email exist done");
+      }
+      return await response.json()
+    } else {
+      if (window.firstId.debug) {
+        console.error("[FIRSTID] Error on check email exist", response.status, response.statusText);
+      }
+    }
+  }
+
+  this._createFirstIdByEmail = async (emailHashed) => {
+    // appel API pour créer un first-id via un email
+    const response = await fetch(`${this.config.firstIdApiBaseUrl}/createFidViaEmail`, {
+      method: 'POST',
+      body: JSON.stringify({
+        email: emailHashed
+      })
+    })
+    if (response.ok) {
+      if (window.firstId.debug) {
+        console.debug("[FIRSTID] Create first-id by email done");
+      }
+      return response.json()
+    } else {
+      if (window.firstId.debug) {
+        console.error("[FIRSTID] Error on create first-id by email", response.status, response.statusText);
+      }
+    }
+  }
+
+  this._getFirstIdByIPUA = async () => {
+    // appel API pour récupérer un first-id via l'ip et l'ua
+    const response = await fetch(`${this.config.firstIdApiBaseUrl}/firstId`, {})
+    if (response.ok) {
+      if (window.firstId.debug) {
+        console.debug("[FIRSTID] Get first-id by print done");
+      }
+      return response.json()
+    } else {
+      if (window.firstId.debug) {
+        console.error("[FIRSTID] Error on get first-id by print", response.status, response.statusText);
+      }
+    }
+  }
+
+  this.setEmailHashed = async (emailHashed) => {
+    if (this.firstId) {
+      let matchResponse = await this._checkMatchCookieWIthEMail(emailHashed)
+      if (!matchResponse.match) { // le cookie du domaine match avec le firstid associé à l'email
+        this._setFirstIdCookie(matchResponse.firstId) // mise à jour du cookie first-id sur le domaine courrant avec la valeur renvoyer par l'API
+        this._createRefreshCookie() // créer un cookie indiquant au CDN de l'éditeur de refaire une redirection vers la gate en passant l'email en query params
+      }
+    } else {
+      let emailExistResponse = await this._checkEmailExist(emailHashed)
+      if (emailExistResponse.exist) {
+        this._setFirstIdCookie(emailExistResponse.firstId) // création du cookie first-id sur le domaine courrant avec la valeur renvoyer par l'API
+        this._createRefreshCookie()
+      } else {
+        let createFirstIdResponse = await this._createFirstIdByEmail(emailHashed)
+        if (createFirstIdResponse) {
+          this._setFirstIdCookie(createFirstIdResponse.firstId) // création du cookie first-id sur le domaine courrant avec la valeur renvoyer par l'API
+          this._createRefreshCookie()
+        }
+      }
+    }
+
+    this._setCookie(this.config.syncFidEmailCookieName, 1, 60*24) // 1 jour
+  }
+
+  this.init = () => {
+    // check configuration
+    if (this.config.emailGetterCallback !== null && typeof this.config.emailGetterCallback !== 'function') {
+      throw new FirstIdEmailGetterCallbackIsNotFunction()
+    }
+
+    try {
+      this.firstId = this.getId() ?? null;
+    } catch (e) {}
+
+    try {
+      this.emailHashed = this.getEmailHashed() ?? null;
+    } catch (e) {}
+
+    if (this.config.isIframe) {
+      this.askFirstIdToParentIframe()
+    } else {
+      // listen any request from an iframe
+      this._addListerFromIframeMessage()
+
+      if (this.firstId) {
+        if (!this._hashAlreadyUpdateIpUa()) {
+          this._updateIpUa()
+        }
+      } else {
+        if (this.config.firstIdEchoFeature) {
+          // set cookie refresh if gate create a firstId
+          this.firstId = this._getFirstIdByIPUA()?.firstId || null
+        }
+      }
+
+      if (this.emailHashed) {
+        if (!this._hashAlreadyCheckFirstIdEmailAssociation()) { // vérifie un cookie indiquant la date du dernier check avec l'API FirstId
+          this.setEmailHashed(this.emailHashed).then(() => {
+            if (this.config.debug) {
+              console.debug(`[FIRSTID] Email hashed ${this.emailHashed} has been set`);
+            }
+          })
+        }
+      }
+    }
+  }
+
+  this.iframeAppendFirstIdToLink = () => {
+    if (this.config.debug) {
+      console.debug(`[FIRSTID IFRAME] Try to append firstID to link with the css selector`, this.config.iframeAppendFirstIdToLinkCssSelector)
+    }
+    this.config.iframeAppendFirstIdToLinkCssSelector.forEach((cssSelector) => {
+      const links = document.querySelectorAll(cssSelector)
+      if (this.config.debug) {
+        console.debug(`[FIRSTID IFRAME] Found ${links.length} links for cssSelector ${cssSelector}`)
+      }
+      if (links.length === 0) {
+        return;
+      }
+
+      links.forEach((link) => {
+        if (link.href && !link.href.includes('firstid')) {
+          if (link.href.indexOf('?') === -1) {
+            link.href += `?firstid=${this.firstId}`
+          } else {
+            link.href += `&firstid=${this.firstId}`
+          }
+        } else if (link.src && !link.src.includes('firstid')) {
+          if (link.src.indexOf('?') === -1) {
+            link.src += `?firstid=${this.firstId}`
+          } else {
+            link.src += `&firstid=${this.firstId}`
+          }
+        }
+      })
+    })
+  }
+}

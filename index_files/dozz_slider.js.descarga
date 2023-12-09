@@ -1,0 +1,527 @@
+if(typeof $ == "function"){
+    $.prototype.zzSlider = function(objectConf, callbacks){
+        new DozzSlider(this.get(0), objectConf, callbacks);
+    }
+}
+
+class DozzSlider{
+
+    static new(element, objectConf, callbacks){
+        new DozzSlider(element, objectConf, callbacks);
+    }
+
+
+    constructor(sliderElement, objectConf, callbacks){
+        this.sliderContainer = document.createElement("div");
+        this.sliderContainer.className = "ZZS_slider-container";
+
+        this.rail = document.createElement("div");
+        this.rail.className = "ZZS_slider-rail";
+
+        this.dragType = (navigator.maxTouchPoints > 0)? "touch": "mouse";
+        $(this.rail).attr("data-drag_type", this.dragType);
+
+        $(sliderElement).children().appendTo($(this.sliderContainer));
+        $(sliderElement).append($(this.rail).append($(this.sliderContainer)));
+        $(sliderElement).addClass("ZZS_loaded");
+
+        if(typeof objectConf != "undefined"){
+            this.configs = {
+                prevBtn             : objectConf.addBtns? this.getControlBtn("prev", objectConf) : undefined,
+                nextBtn             : objectConf.addBtns? this.getControlBtn("next", objectConf) : undefined,
+                btnsConfig          : objectConf.btnsConfig,
+                preventClick        : (typeof objectConf.preventClick != "undefined")? objectConf.preventClick : [],
+                maxSlideAnimation   : "type_animation",
+                slideDesktopEffect  : objectConf.desktopSliderEffect,
+                forceBreakpoints    : typeof objectConf.forceBreakpoints != "undefined"? objectConf.forceBreakpoints : false,
+            };
+        }else{
+            //Default configs
+            this.configs = {};
+        }
+
+        this.callbacks = {};
+        this.callbacks = Object.assign(this.callbacks, callbacks);
+
+        if(this.configs.slideDesktopEffect){
+            this.initSliderEffect();
+        }
+        this.init();
+    }
+
+    // Aplicar efecto de continuidad en el desplazamiento tras soltar, simulando el efecto de scroll en móvil
+    initSliderEffect(){
+        let $that = this;
+        this.sliderEffect = {
+            zzSlider: $that,
+            lastPosition: 0,//Last clientPosition
+            checkNewAction: true,//Cuando es true se registra el próximo dragAction
+            actions: [],//space dragged in lasts time intervals
+            newAction: function(clientX){
+                if(this.checkNewAction){
+                    this.checkNewAction = false;
+
+                    let newPosition = Math.abs(clientX) - Math.abs(this.lastPosition);
+                    this.lastPosition = clientX;
+                    this.actions.push(Math.abs(newPosition));
+
+                    let $this = this;
+                    setTimeout(() => {
+                        $this.checkNewAction = true;
+                    }, 20);
+                }
+            },
+            reset: function(){
+                this.checkNewAction = true;
+                this.actions = [];
+            },
+            applyEffect: function(clientX){
+                // Si no hay registro de acciones retorna false
+                if(this.actions.length <= 0){
+                    return false;
+                }
+                
+                let $this = this;
+                let effect = function(time, percent){
+                    $this.zzSlider.sliderContainer.style.transition = time + "s";
+                    let leftMove = $this.zzSlider.position.startX + -($this.zzSlider.position.clientStartX - clientX) + percent*($this.zzSlider.sliderDirection < 0? -1:1);
+                    
+                    // Comprobar límites de desplazamiento
+                    if(leftMove > 0){
+                        leftMove = 0;
+                    }
+                    if($this.zzSlider.sliderContainer.parentElement.clientWidth - $this.zzSlider.sliderContainer.clientWidth > leftMove){
+                        leftMove = $this.zzSlider.sliderContainer.parentElement.clientWidth - $this.zzSlider.sliderContainer.clientWidth;
+                    }
+                    //Aplicar efecto
+                    $this.zzSlider.sliderContainer.style.left = leftMove + "px";
+                    setTimeout(() => {
+                        $this.zzSlider.sliderContainer.style.transition = "";
+                    }, time*1000 + 100);
+                };
+
+                this.newAction(clientX);
+
+                let tmp = 0;
+                let progressive = 1;
+                
+                let lastOne = this.actions[this.actions.length - 1];
+
+                let lastAction = this.actions[this.actions.length - 1] + (this.actions[this.actions.length - 2]/10);
+                for (let i = this.actions.length - 1; i >=0 && i > this.actions.length - 5; i--) {
+                    tmp += this.actions[i];
+                        
+                    if(progressive >= 0 && this.actions[i] > lastOne + 30){
+                        progressive--;
+                    }
+                    
+                    lastOne = this.actions[i];
+                }
+                //Strong efect
+                if(lastAction > 10 && tmp > 600 && progressive >= 0){
+                    effect(0.5, tmp);
+                }
+                //Medium efect
+                else if(lastAction > 10 && tmp > 300){
+                    effect(0.4, tmp*0.8);
+                }
+                //Minimal efect
+                else if(lastAction > 10 && tmp > 50){
+                    effect(0.5, tmp*0.6);
+                }
+            }
+        }
+    }
+
+    init(){
+        this.checkCallbacks = {
+            loadMore    : 0,
+            update      : 0
+        }
+
+        this.preventClickEvent = [];
+
+        this.itemSize = {
+            width: 0,
+            height: 0,
+            margin: 0
+        }
+        this.loadItemSizes();
+        this.position = {
+            startX: 0,
+            startY: 0,
+            clientStartX: 0,
+            clientStartY: 0,
+
+            x: 0,
+            y: 0,
+            clientX: 0,
+            clientY: 0
+        }
+        this.dragType = undefined;
+        this.scrolling = false;
+        this.sliderDirection = 0;
+        
+        this.addEvents();
+        this.sliderContainer.style.left = "0px";
+    }
+
+    addEvents(){
+        
+        let that = this;
+
+        let lastTouch = {
+            x: 0, y: 0
+        };
+        
+        // For Desktop:
+        // Mouse events
+        this.sliderContainer.addEventListener("mousedown", function(e){
+            // Disable mouse event propagation from touch event
+            if(that.dragType == "touch" && Math.round(that.getClientPosition(e, "x")) == Math.round(lastTouch.x) && Math.round(that.getClientPosition(e, "y")) == Math.round(lastTouch.y)){
+                return false;
+            }
+
+            if(e.button == 0 && that.sliderContainer.clientWidth > that.sliderContainer.parentElement.clientWidth){
+                that.dragStart(e);
+            }else{
+                
+            }
+        });
+        
+        // FOR MOBILE
+        // Touch events
+        this.sliderContainer.addEventListener('touchstart', function(e){
+            lastTouch.x = that.getClientPosition(e, "x");
+            lastTouch.y = that.getClientPosition(e, "y");
+            if(that.sliderContainer.clientWidth > that.sliderContainer.parentElement.clientWidth){
+                that.dragStart(e);
+            }
+        });
+
+        /*this.sliderContainer.addEventListener('touchend', function(e){
+            if(that.sliderContainer.clientWidth > that.sliderContainer.parentElement.clientWidth){
+                that.dragEnd(e);
+            }
+        });
+        this.sliderContainer.addEventListener('touchmove', function(e){
+            if(that.sliderContainer.clientWidth > that.sliderContainer.parentElement.clientWidth && (typeof that.drag == "undefined" || that.drag === true)){
+                that.dragAction(e);
+            }
+        });*/
+
+        // Other events
+        window.addEventListener("resize", function(){
+            that.loadItemSizes();
+            if(typeof that.sliderEffect == "undefined" && navigator.maxTouchPoints <= 0){
+                that.initSliderEffect();
+                that.dragType = "mouse";
+                $(".ZZS_slider-rail").attr("data-drag_type", "mouse");
+            }else if(that.sliderEffect && navigator.maxTouchPoints > 0){
+                that.sliderEffect = undefined;
+                that.dragType = "touch";
+                $(".ZZS_slider-rail").attr("data-drag_type", "touch");
+            }
+        });
+    }
+
+
+    // -------------------- DRAGGED -------------------- //
+
+    dragStart (e) {
+        this.sliderContainer.style.transition = "";
+        let that = this;
+        e = e || window.event;
+
+        this.position.startX = this.sliderContainer.offsetLeft;
+        this.position.startY = this.sliderContainer.offsetTop;
+        this.position.clientStartX = this.getClientPosition(e, "x");
+        this.position.clientStartY = this.getClientPosition(e, "y");
+
+        // TODO
+        if(this.configs.slideDesktopEffect && e.type == "mouse" && typeof this.sliderEffect != "undefined"){
+            this.sliderEffect.reset();
+        }
+
+        this.swipping = undefined;
+        this.scrolling = undefined;
+
+        if (e.type == 'touchstart') {
+            this.dragType = "touch";
+            $(".ZZS_slider-rail").attr("data-drag_type", "touch");
+        } else {
+            this.dragType = "mouse";
+            $(".ZZS_slider-rail").attr("data-drag_type", "mouse");
+            e.preventDefault();
+
+            this.clickPrevented = false;
+
+            for (let preventClass of this.configs.preventClick) {
+                for (let element of e.composedPath()) {
+                    if (typeof $(element).hasClass == "function" && $(element).hasClass(preventClass) || element.id == preventClass) {
+                        this.preventClickEvent.push(element);
+                    }
+                }
+            }
+
+            document.onmouseup = function(ev){that.dragEnd(ev);};
+            document.onmouseleave = function(ev){that.dragEnd(ev);};
+            document.onmousemove = function(ev){that.dragAction(ev);};
+        }
+
+    }
+
+    dragEnd (e) {
+        if(e.type.includes("touch")){
+            return false;
+        }
+        if(this.preventClickEvent.length > 0){
+            for (let element of this.preventClickEvent) {
+                setTimeout(() => {
+                    $(element).removeAttr("disabled");
+                    $(element).removeClass("disabled");
+                }, 200);
+            }
+        }
+
+        // Limite del contenedor por la derecha
+        if(this.sliderContainer.parentElement.clientWidth - this.sliderContainer.clientWidth > this.sliderContainer.offsetLeft){
+            this.sliderContainer.style.transition = "0.5s";
+            this.sliderContainer.style.left = this.sliderContainer.parentElement.clientWidth - this.sliderContainer.clientWidth + "px";
+
+            let that = this;
+            setTimeout(() => {
+                that.sliderContainer.style.transition = "";
+            }, 600);
+        // Límite del contenedor por la izquierda
+        }else if(this.sliderContainer.offsetLeft >= 30){
+            this.sliderContainer.style.transition = "0.5s";
+            this.sliderContainer.style.left = "0px";
+
+            let that = this;
+            setTimeout(() => {
+                that.sliderContainer.style.transition = "";
+            }, 600);
+        }else{
+            // Añadir efecto de movimiento tras dejar de arrastrar
+            //TODO
+            if(this.configs.slideDesktopEffect && this.dragType == "mouse" && typeof this.sliderEffect != "undefined"){
+                this.sliderEffect.applyEffect(this.getClientPosition(e, "x"));
+            }
+        }
+
+        this.posInitial = 0;
+        document.onmouseup = null;
+        document.onmouseleave = null;
+        document.onmousemove = null;
+
+        this.sliderContainer.touchmove = null;
+    }
+
+    dragAction (e) {
+        if(e.type.includes("touch")){
+            return false;
+        }
+        if(((this.swipping && !this.scrolling) || (typeof this.swipping == "undefined" && typeof this.scrolling == "undefined")) && this.dragType == "mouse"){
+            e = e || window.event;
+
+            let clientX = this.getClientPosition(e, "x");
+            let clientY = this.getClientPosition(e, "y");
+    
+            e.preventDefault();
+            
+            if(this.preventClickEvent.length > 0 && !this.clickPrevented){
+                this.clickPrevented = true;
+                for (let element of this.preventClickEvent) {
+                    $(element).attr("disabled", "disabled");
+                    $(element).addClass("disabled");
+                }
+            }
+    
+            let lastSliderDirection = this.sliderDirection;
+            this.sliderDirection = clientX - this.position.x;
+            
+    
+            if(this.sliderContainer.parentElement.clientWidth - this.sliderContainer.clientWidth > this.sliderContainer.offsetLeft + 30 && this.sliderDirection < 0){
+                //this.maxSlide(e);
+
+                let leftPos = this.position.startX + -(this.position.clientStartX - clientX);
+                this.sliderContainer.style.left = leftPos + "px";
+
+                if(typeof this.callbacks.loadMore == "function" && this.checkCallbacks.loadMore != 1){
+                    this.checkCallbacks.loadMore = 1;
+
+                    let that = this;
+                    this.callbacks.loadMore(function(htmlElements){
+                        for (let i = 0; i < htmlElements.length; i++) {
+                            that.appendElement(htmlElements[i]);
+                        }
+                        if(htmlElements.length > 0){
+                            that.checkCallbacks.loadMore = 0;
+                        }else{
+                            that.callbacks.loadMore = undefined;
+                        }
+                    });
+                }
+
+                if(this.configs.slideDesktopEffect && this.dragType == "mouse" && typeof this.sliderEffect != "undefined"){
+                    this.sliderEffect.reset();
+                }
+            }else if(this.sliderContainer.offsetLeft >= 30 && this.sliderDirection > 0){
+                //this.maxSlide(e);
+
+                let leftPos = this.position.startX + -(this.position.clientStartX - clientX);
+                this.sliderContainer.style.left = leftPos + "px";
+
+                if(typeof this.callbacks.update == "function" && this.checkCallbacks.update != 1){
+                    this.checkCallbacks.update = 1;
+    
+                    let that = this;
+                    this.callbacks.update(function(htmlElements){
+                        for (let i = 0; i < htmlElements.length; i++) {
+                            that.prependElement(htmlElements[i]);
+                        }
+                    });
+                }
+
+                if(this.configs.slideDesktopEffect && this.dragType == "mouse" && typeof this.sliderEffect != "undefined"){
+                    this.sliderEffect.reset();
+                }
+            }else{
+                let leftPos = this.position.startX + -(this.position.clientStartX - clientX);
+                this.sliderContainer.style.left = leftPos + "px";
+
+                // Solo da error en escritorio con pantalla táctil, siguiendo el debug de chrome, parece que la variable se resetea
+                // TODO TO-DO !importante
+                if(this.configs.slideDesktopEffect && this.dragType == "mouse" && typeof this.sliderEffect != "undefined"){
+                    this.sliderEffect.newAction(clientX);
+                    //ChangeDirection
+                    if((lastSliderDirection < 0 && this.sliderDirection > 0) || (lastSliderDirection > 0 && this.sliderDirection < 0)){
+                        this.sliderEffect.reset();
+                        this.sliderEffect.newAction(clientX);
+                    }
+                }
+            }
+
+            this.position.x = clientX;
+        }
+    }
+
+    // -------------------- HELPERS -------------------- //
+
+    getControlBtn(type, objectConf){
+        let btn = document.createElement("button");
+        let icon = document.createElement("i");
+        if(typeof objectConf.btnIcon != "undefined" && objectConf.btnIcon != ""){
+            icon = document.createElement("img");
+            icon.setAttribute("src", objectConf.btnIcon);
+            icon.className = "chevron-" + ((type=="prev")? "left" : "right");
+        }else{
+            icon.className = "bi bi-chevron-" + ((type=="prev")? "left" : "right");
+        }
+
+        btn.id = "ZZS_" + type + "-btn";
+        btn.className = "ZZS_control-btn";
+        btn.append(icon);
+
+        let that = this;
+        btn.addEventListener("click", function(){
+            if(that.sliderContainer.clientWidth > that.sliderContainer.parentElement.clientWidth){
+                that.sliderContainer.style.transition = "0.8s";
+                that.loadItemSizes();
+                that.controlBtns(type);
+            }
+        });
+
+        if(type == "prev"){ $(this.rail).prepend(btn); }
+        else{ $(this.rail).append(btn); }
+    }
+
+    maxSlide(e){
+        let clientX = this.getClientPosition(e, "x");
+
+        this.position.startX = this.sliderContainer.offsetLeft;
+
+        this.position.clientStartX = clientX;
+    }
+
+    getClientPosition(e, xy){
+        if(xy == "x"){
+            return (e.type.includes("touch"))? e.touches[0].clientX : e.clientX;
+        }else if(xy == "y"){
+            return (e.type.includes("touch"))? e.touches[0].clientY : e.clientY;
+        }
+        return false;
+    }
+
+    appendElement(htmlElement){
+        this.sliderContainer.append(htmlElement);
+    }
+
+    prependElement(htmlElement){
+        this.sliderContainer.prepend(htmlElement);
+    }
+
+    loadItemSizes(){
+        this.itemSize.width = this.sliderContainer.children[0].offsetWidth;
+        this.itemSize.height = this.sliderContainer.children[0].offsetHeight;
+        this.itemSize.margin = parseFloat(window.getComputedStyle(this.sliderContainer.children[0]).marginRight);// + parseFloat(window.getComputedStyle(this.sliderContainer.children[0]).marginLeft);
+    }
+
+    controlBtns(action){
+        let $this = this;
+
+        // Obtiene la cantidad de píxeles que están ocultos de la primera/última stories visible del slider.
+        let getScrollLastStory = function(){
+            let visibleItem;
+            let items = $this.sliderContainer.children;
+
+            if(action == "prev"){
+                for (let i = 0; i < items.length && typeof visibleItem == "undefined"; i++) {
+                    if(Math.abs(items[i].offsetLeft) > Math.abs($this.sliderContainer.offsetLeft)){
+                        visibleItem = items[i];
+                    }
+                }
+    
+                return ($this.itemSize.width + $this.itemSize.margin) - (Math.abs(visibleItem.offsetLeft) - Math.abs($this.sliderContainer.offsetLeft));   
+            }else{
+                for (let i = items.length - 1; i >= 0 && typeof visibleItem == "undefined"; i--) {
+                    if(Math.abs(items[i].offsetLeft) < Math.abs($this.sliderContainer.offsetLeft) + Math.abs($this.sliderContainer.parentElement.offsetWidth)){
+                        visibleItem = items[i];
+                    }
+                }
+    
+                return visibleItem.offsetLeft - $this.sliderContainer.parentElement.offsetWidth - Math.abs($this.sliderContainer.offsetLeft) + $this.itemSize.width + $this.itemSize.margin;
+            }
+        }
+        
+        let mediaStory = (this.itemSize.width + this.itemSize.margin)/2;
+        let moveStories;
+
+        // Move configurations. Configure this the count stories of move per click
+        if(typeof this.configs.btnsConfig != "undefined"){
+            moveStories = 0;
+            if(this.configs.btnsConfig.scrollLastStory){moveStories += getScrollLastStory();}
+            if(this.configs.btnsConfig.slidesToScroll){moveStories += this.configs.btnsConfig.slidesToScroll * mediaStory * 2}
+        }else{
+            // Default move, media story + lo que le falte a la story cortada. (Min result: 0.51 stories. MaxResult: 1.49 stories)
+            moveStories = mediaStory + getScrollLastStory();
+        }
+
+        // ----- Limit container move ----- //
+        let maxRightMove = this.sliderContainer.offsetWidth - this.sliderContainer.parentElement.offsetWidth - Math.abs(this.sliderContainer.offsetLeft);
+        let maxLeftMove = Math.abs(this.sliderContainer.offsetLeft);
+
+        if(action == "next" && Math.abs(moveStories) > maxRightMove){
+            moveStories = maxRightMove;
+        }else if(action == "prev" && moveStories > maxLeftMove){
+            moveStories = Math.abs(maxLeftMove);
+        }
+        //
+
+        if(action == "next"){moveStories *= -1;}
+
+        this.sliderContainer.style.left = this.sliderContainer.offsetLeft + moveStories + "px";
+    }
+
+}
